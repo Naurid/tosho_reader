@@ -1,5 +1,7 @@
 package com.naurid.tosho.ui.home
 
+import android.widget.Toast
+import com.naurid.tosho.source.core.atsumaru.LatestUpdateUiModel
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -18,6 +20,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.ui.platform.LocalContext
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.jsoup.Jsoup
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -97,7 +109,8 @@ data class SampleManga(
     val timeAgo: String? = null,
     val scanlator: String? = null,
     val format: String = "MANGA",
-    val rank: Int = 0
+    val rank: Int = 0,
+    val coverUrl: String? = null
 )
 
 @Composable
@@ -106,8 +119,74 @@ fun HomeScreen(
     isDarkTheme: Boolean = false,
     onMangaClick: (SampleManga) -> Unit = {}
 ) {
+    val context = LocalContext.current
     var selectedCategory by remember { mutableStateOf(HomeCategory.FEATURED) }
     var searchQuery by remember { mutableStateOf("") }
+    var scrapedLatestItems by remember { mutableStateOf<List<LatestUpdateUiModel>>(emptyList()) }
+    var isRefreshing by remember { mutableStateOf(false) }
+    var currentPage by remember { mutableStateOf(1) }
+    var isLoadingMore by remember { mutableStateOf(false) }
+    var hasMore by remember { mutableStateOf(true) }
+    val scope = rememberCoroutineScope()
+    val plugin = remember { com.naurid.tosho.source.core.atsumaru.AtsumaruSourcePlugin() }
+
+    // Fetch tailored UI models on app open via AtsumaruSourcePlugin
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            plugin.getLatestUpdatesUiModels(1).onSuccess { models ->
+                scrapedLatestItems = models
+            }
+        }
+    }
+
+    val loadMore: () -> Unit = {
+        if (!isLoadingMore && hasMore && currentPage < 4) {
+            scope.launch(Dispatchers.IO) {
+                isLoadingMore = true
+                val nextPage = currentPage + 1
+                plugin.getLatestUpdatesUiModels(nextPage).onSuccess { models ->
+                    if (models.isNotEmpty()) {
+                        scrapedLatestItems = scrapedLatestItems + models
+                        currentPage = nextPage
+                    } else {
+                        hasMore = false
+                    }
+                }.onFailure {
+                    hasMore = false
+                }
+                isLoadingMore = false
+            }
+        }
+    }
+
+    val refreshLatest: () -> Unit = {
+        scope.launch(Dispatchers.IO) {
+            isRefreshing = true
+            plugin.refreshLatestUpdatesUiModels().onSuccess { models ->
+                scrapedLatestItems = models
+                currentPage = 1
+                hasMore = true
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Refreshed latest updates", Toast.LENGTH_SHORT).show()
+                }
+            }.onFailure { e ->
+                withContext(Dispatchers.Main) {
+                    val message = if (e.message == "COOLDOWN") {
+                        "Please wait a few minutes before refreshing again to respect server limits."
+                    } else {
+                        "Refresh failed. Please check your connection."
+                    }
+                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                }
+            }
+            isRefreshing = false
+        }
+    }
+
+    val latestUiItems = remember(scrapedLatestItems, searchQuery) {
+        val list = scrapedLatestItems ?: emptyList()
+        if (searchQuery.isBlank()) list else list.filter { it.title.contains(searchQuery, ignoreCase = true) }
+    }
 
     val textPrimary = if (isDarkTheme) DarkTextPrimary else LightTextPrimary
     val textSecondary = if (isDarkTheme) DarkTextSecondary else LightTextSecondary
@@ -122,7 +201,7 @@ fun HomeScreen(
             HomeCategory.FEATURED -> allSampleData
             HomeCategory.CONTINUE_READING -> allSampleData.filter { it.progress > 0f }
             HomeCategory.TRENDING_NOW -> allSampleData.sortedBy { it.rank }
-            HomeCategory.LATEST_UPDATES -> allSampleData.filter { it.latestChapter != null }
+            HomeCategory.LATEST_UPDATES -> emptyList() // handled via latestUiItems
             HomeCategory.POPULAR -> allSampleData.sortedByDescending { it.rating }
         }
 
@@ -305,9 +384,25 @@ fun HomeScreen(
                 }
                 HomeCategory.LATEST_UPDATES -> {
                     LatestUpdatesView(
-                        items = filteredItems,
+                        items = latestUiItems,
                         isDarkTheme = isDarkTheme,
-                        onMangaClick = onMangaClick
+                        onItemClick = { uiModel ->
+                            onMangaClick(
+                                SampleManga(
+                                    id = uiModel.id,
+                                    title = uiModel.title,
+                                    author = "Atsumaru",
+                                    rating = uiModel.rating,
+                                    genres = listOf(uiModel.type),
+                                    synopsis = "",
+                                    coverUrl = uiModel.coverUrl
+                                )
+                            )
+                        },
+                        isRefreshing = isRefreshing,
+                        onRefresh = refreshLatest,
+                        isLoadingMore = isLoadingMore,
+                        onLoadMore = loadMore
                     )
                 }
                 HomeCategory.POPULAR -> {
@@ -722,79 +817,150 @@ private fun TrendingView(
 // =========================================================================
 // SECTION 4: LATEST UPDATES (Real-time chapter releases feed)
 // =========================================================================
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun LatestUpdatesView(
-    items: List<SampleManga>,
+    items: List<LatestUpdateUiModel>,
     isDarkTheme: Boolean,
-    onMangaClick: (SampleManga) -> Unit
+    onItemClick: (LatestUpdateUiModel) -> Unit,
+    isRefreshing: Boolean,
+    onRefresh: () -> Unit
 ) {
+    val context = LocalContext.current
     val textPrimary = if (isDarkTheme) DarkTextPrimary else LightTextPrimary
     val textSecondary = if (isDarkTheme) DarkTextSecondary else LightTextSecondary
     val glassBg = if (isDarkTheme) DarkGlassBackground else LightGlassBackground
     val glassBorder = if (isDarkTheme) DarkGlassBorder else LightGlassBorder
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        contentPadding = PaddingValues(bottom = 32.dp)
+    PullToRefreshBox(
+        isRefreshing = isRefreshing,
+        onRefresh = onRefresh,
+        modifier = Modifier.fillMaxSize()
     ) {
-        items(items) { manga ->
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable { onMangaClick(manga) },
-                shape = RoundedCornerShape(10.dp),
-                color = glassBg,
-                border = androidx.compose.foundation.BorderStroke(1.dp, glassBorder)
-            ) {
-                Row(
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(bottom = 32.dp)
+        ) {
+            items(items) { item ->
+                Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { onItemClick(item) },
+                    shape = RoundedCornerShape(10.dp),
+                    color = glassBg,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, glassBorder)
                 ) {
-                    Image(
-                        painter = painterResource(id = R.drawable.cover_example),
-                        contentDescription = manga.title,
-                        contentScale = ContentScale.Crop,
+                    Row(
                         modifier = Modifier
-                            .size(width = 50.dp, height = 70.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                    )
+                            .fillMaxWidth()
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // 1. Cover Image
+                        if (!item.coverUrl.isNullOrEmpty()) {
+                            val imageRequest = remember(item.coverUrl) {
+                                ImageRequest.Builder(context)
+                                    .data(item.coverUrl)
+                                    .crossfade(true)
+                                    .build()
+                            }
+                            AsyncImage(
+                                model = imageRequest,
+                                contentDescription = item.title,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(width = 55.dp, height = 75.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                            )
+                        } else {
+                            Image(
+                                painter = painterResource(id = R.drawable.cover_example),
+                                contentDescription = item.title,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(width = 55.dp, height = 75.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                            )
+                        }
 
-                    Spacer(modifier = Modifier.width(12.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
 
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = manga.title.uppercase(),
-                            style = TextStyle(
-                                fontFamily = FontFamily.SansSerif,
-                                fontWeight = FontWeight.Black,
-                                fontSize = 15.sp,
-                                letterSpacing = (-0.5).sp,
-                                color = textPrimary
-                            ),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            // 2. Name (Title)
+                            Text(
+                                text = item.title.uppercase(),
+                                style = TextStyle(
+                                    fontFamily = FontFamily.SansSerif,
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 15.sp,
+                                    letterSpacing = (-0.5).sp,
+                                    color = textPrimary
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
 
-                        Spacer(modifier = Modifier.height(2.dp))
+                            Spacer(modifier = Modifier.height(3.dp))
 
-                        Text(
-                            text = manga.latestChapter ?: "Chapter 1",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = ExpressiveSecondary
-                        )
+                            // 3. Rating & Type
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.Star,
+                                        contentDescription = null,
+                                        tint = Color(0xFFFFD700),
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text(
+                                        text = item.rating,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = textPrimary
+                                    )
+                                }
 
-                        Spacer(modifier = Modifier.height(2.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = textPrimary.copy(alpha = 0.1f)
+                                ) {
+                                    Text(
+                                        text = item.type,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = textPrimary,
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
 
-                        Text(
-                            text = "${manga.scanlator ?: "Official"} • ${manga.timeAgo ?: "recently"}",
-                            fontSize = 11.sp,
-                            color = textSecondary
-                        )
+                            Spacer(modifier = Modifier.height(3.dp))
+
+                            // 4. Viewer number & 5. How long the update was (Time Ago)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = item.viewerCount,
+                                    fontSize = 11.sp,
+                                    color = textSecondary
+                                )
+
+                                Text(
+                                    text = item.timeAgo,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ExpressiveSecondary
+                                )
+                            }
+                        }
                     }
                 }
             }

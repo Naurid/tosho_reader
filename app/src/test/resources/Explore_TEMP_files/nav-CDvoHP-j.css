@@ -1,0 +1,2 @@
+/*! tailwindcss v4.3.3 | MIT License | https://tailwindcss.com */
+@keyframes _viewScale_63y85_15{0%,to{opacity:.8;transform:scale(.9)}50%{opacity:1;transform:scale(1)}}@media (max-width:768px){@supports (animation-timeline:view()){._viewScale_63y85_15{will-change:transform;animation:linear both _viewScale_63y85_15;animation-timeline:view(inline);animation-range:cover}}}._root_zirk4_2 mark{all:unset;color:var(--color-accent,#8e7ce6);position:relative}

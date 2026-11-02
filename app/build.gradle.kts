@@ -58,4 +58,9 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     implementation(libs.androidx.compose.material.icons.extended)
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.jsoup:jsoup:1.17.2")
+    implementation("io.coil-kt:coil-compose:2.7.0")
+    testImplementation("org.jsoup:jsoup:1.17.2")
+    testImplementation("junit:junit:4.13.2")
 }
