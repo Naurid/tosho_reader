@@ -57,6 +57,7 @@ fun ToshoApp(
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     var selectedRoute by remember { mutableStateOf("Home") }
+    var selectedMangaId by remember { mutableStateOf<String?>(null) }
 
     val reducedThresholdDp = 64.dp
     val reducedThresholdPx = with(density) { reducedThresholdDp.toPx() }
@@ -144,10 +145,20 @@ fun ToshoApp(
                 modifier = Modifier.fillMaxSize(),
                 containerColor = animatedScaffoldBg
             ) { innerPadding ->
-                if (selectedRoute.equals("Home", ignoreCase = true) || selectedRoute.equals("Example1", ignoreCase = true)) {
+                if (selectedMangaId != null) {
+                    com.naurid.tosho.ui.detail.MangaDetailScreen(
+                        mangaId = selectedMangaId!!,
+                        onBack = { selectedMangaId = null },
+                        isDarkTheme = isDarkTheme,
+                        modifier = Modifier.padding(innerPadding)
+                    )
+                } else if (selectedRoute.equals("Home", ignoreCase = true) || selectedRoute.equals("Example1", ignoreCase = true)) {
                     com.naurid.tosho.ui.home.HomeScreen(
                         modifier = Modifier.padding(innerPadding),
-                        isDarkTheme = isDarkTheme
+                        isDarkTheme = isDarkTheme,
+                        onMangaClick = { manga ->
+                            selectedMangaId = manga.id
+                        }
                     )
                 } else {
                     Box(

@@ -47,6 +47,16 @@ data class LatestUpdateUiModel(
     val url: String
 )
 
+data class PopularUIModel(
+    val id: String,
+    val title: String,
+    val coverUrl: String?,
+    val viewerCount: String,
+    val rating: String,
+    val type: String,
+    val url: String
+)
+
 class AtsumaruSourcePlugin : SourcePlugin {
 
     override val id: String = "atsumaru"
@@ -60,6 +70,7 @@ class AtsumaruSourcePlugin : SourcePlugin {
 
     // Caching and Rate Limiting / Throttling state to respect robots.txt and server performance
     private var cachedLatestBooks: List<Book> = emptyList()
+    private var cachedPopularBooks: List<Book> = emptyList()
     private var lastFetchTimestamp: Long = 0L
     private var lastManualRefreshTimestamp: Long = 0L
     private val cacheDurationMs = 30 * 60 * 1000L // 30 minutes cache on app open
@@ -114,7 +125,7 @@ class AtsumaruSourcePlugin : SourcePlugin {
         }
 
         val offset = (page - 1) * 40
-        val url = "$baseUrl/api/home2/hotUpdates?offset=$offset&limit=40&types=Manga%2CManwha%2CManhua%2COEL%2COther&mediums=Comic%2CNovel&contentRatings=Safe%2CSuggestive%2CErotica"
+        val url = "$baseUrl/api/home2/recentlyUpdated?offset=$offset&limit=40&types=Manga%2CManwha%2CManhua%2COEL%2COther&mediums=Comic%2CNovel&contentRatings=Safe%2CSuggestive%2CErotica"
 
         Log.d("ToshoScraper", "Fetching JSON API (page $page, offset $offset): $url")
         val request = Request.Builder()
@@ -208,11 +219,9 @@ class AtsumaruSourcePlugin : SourcePlugin {
     suspend fun refreshLatestUpdatesUiModels(): Result<List<LatestUpdateUiModel>> = runCatching {
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastManualRefreshTimestamp < refreshCooldownMs) {
-            Log.d("ToshoScraper", "Refresh blocked by cooldown policy.")
             throw IllegalStateException("COOLDOWN")
         }
 
-        Log.d("ToshoScraper", "Manual refresh triggered via JSON API.")
         val models = getLatestUpdatesUiModels(1).getOrThrow()
         if (models.isNotEmpty()) {
             lastManualRefreshTimestamp = currentTime
@@ -220,13 +229,95 @@ class AtsumaruSourcePlugin : SourcePlugin {
         models
     }
 
+    suspend fun getPopularUIModels(page: Int = 1): Result<List<PopularUIModel>> = runCatching {
+        val offset = (page - 1) * 40
+        val url = "$baseUrl/api/home2/popular?offset=$offset&limit=40&types=Manga%2CManwha%2CManhua%2COEL%2COther&mediums=Comic%2CNovel&contentRatings=Safe%2CSuggestive%2CErotica&timeframe=all"
+
+        Log.d("ToshoScraper", "Fetching Popular API (page $page, offset $offset): $url")
+        val request = Request.Builder()
+            .url(url)
+            .headers(getImageHeaders().toHeaders())
+            .build()
+
+        val response = client.newCall(request).execute()
+
+        if (!response.isSuccessful){
+            if (cachedPopularBooks.isNotEmpty() && page == 1){
+                return@runCatching cachedPopularBooks.map{ book ->
+                    PopularUIModel(
+                        id = book.id,
+                        title = book.title,
+                        coverUrl = book.coverUrl,
+                        viewerCount = "18.4K views",
+                        rating = "4.9",
+                        type = "Manga",
+                        url = book.url
+                    )
+                }
+            }
+            throw Exception("API error: ${response.code}")
+        }
+
+        val jsonString = response.body?.string() ?: throw Exception("Empty JSON response")
+        val root = JSONObject(jsonString)
+        val itemsArray = root.getJSONArray("items")
+
+        val list = mutableListOf<PopularUIModel>()
+        for (i in 0 until itemsArray.length()) {
+            val obj = itemsArray.getJSONObject(i)
+            val id = obj.optString("id", "")
+            val title = obj.optString("title", "Unknown")
+            val imagePath = obj.optString("image", "").trim()
+
+            val coverUrl = when {
+                imagePath.isBlank() -> null
+                imagePath.startsWith("http://") || imagePath.startsWith("https://") -> imagePath
+                else -> "https://cdn.atsu.moe/static/${imagePath.trimStart('/')}"
+            }
+
+            val views = obj.optString("views", "0") + " views"
+            val rawRating = obj.optDouble("mbRating", 7.0)
+            val rating = String.format(Locale.US, "%.1f", rawRating)
+            val type = obj.optString("type", "Manga")
+
+            list.add(
+                PopularUIModel(
+                    id = id,
+                    title = title,
+                    coverUrl = coverUrl,
+                    viewerCount = views,
+                    rating = rating,
+                    type = type,
+                    url = "/manga/$id"
+                )
+            )
+        }
+
+        if (list.isNotEmpty() && page == 1) {
+            cachedPopularBooks = list.map { model ->
+                Book(
+                    id = model.id,
+                    sourceId = id,
+                    url = model.url,
+                    title = model.title,
+                    coverUrl = model.coverUrl,
+                    status = BookStatus.UNKNOWN
+                )
+            }
+        }
+
+        list
+    }
     private fun formatTimeAgo(timestamp: Long): String {
         val diff = System.currentTimeMillis() - timestamp
-        val hours = diff / (1000 * 60 * 60)
+        val minutes = diff / (1000 * 60)
+        val hours = minutes / 60
         val days = hours / 24
+
         return when {
             days > 0 -> "$days days ago"
             hours > 0 -> "$hours hours ago"
+            minutes > 0 -> "$minutes minutes ago"
             else -> "Just now"
         }
     }

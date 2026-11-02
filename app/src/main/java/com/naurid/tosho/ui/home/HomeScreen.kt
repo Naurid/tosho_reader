@@ -76,6 +76,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.naurid.tosho.R
+import com.naurid.tosho.source.core.atsumaru.PopularUIModel
 import com.naurid.tosho.ui.theme.DarkBackground
 import com.naurid.tosho.ui.theme.DarkGlassBackground
 import com.naurid.tosho.ui.theme.DarkGlassBorder
@@ -89,9 +90,6 @@ import com.naurid.tosho.ui.theme.LightTextPrimary
 import com.naurid.tosho.ui.theme.LightTextSecondary
 
 enum class HomeCategory(val title: String) {
-    FEATURED("FEATURED"),
-    CONTINUE_READING("CONTINUE READING"),
-    TRENDING_NOW("TRENDING NOW"),
     LATEST_UPDATES("LATEST UPDATES"),
     POPULAR("POPULAR")
 }
@@ -121,14 +119,16 @@ fun HomeScreen(
     onMangaClick: (SampleManga) -> Unit = {}
 ) {
     val context = LocalContext.current
-    var selectedCategory by remember { mutableStateOf(HomeCategory.FEATURED) }
+    var selectedCategory by remember { mutableStateOf(HomeCategory.LATEST_UPDATES) }
     var searchQuery by remember { mutableStateOf("") }
     var scrapedLatestItems by remember { mutableStateOf<List<LatestUpdateUiModel>>(emptyList()) }
     var isRefreshing by remember { mutableStateOf(false) }
+    var latestCurrentPage by remember { mutableStateOf(1) }
+    var isLatestLoadingMore by remember { mutableStateOf(false) }
+    var latestHasMore by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
     val plugin = remember { com.naurid.tosho.source.core.atsumaru.AtsumaruSourcePlugin() }
 
-    // Fetch latest updates when HomeScreen first enters composition.
     LaunchedEffect(Unit) {
         Log.d("ToshoScraper", "Starting latest updates fetch...")
 
@@ -138,15 +138,30 @@ fun HomeScreen(
 
         result.onSuccess { models ->
             Log.d("ToshoScraper", "Fetched ${models.size} items")
-            models.take(5).forEach { model ->
-                Log.d("ToshoScraper", "Fetched title: ${model.title}")
-            }
-
-            // LaunchedEffect resumes on Main, so Compose state is updated safely.
             scrapedLatestItems = models
             Log.d("ToshoScraper", "scrapedLatestItems assigned: ${scrapedLatestItems.size}")
         }.onFailure { error ->
             Log.e("ToshoScraper", "Latest updates fetch failed", error)
+        }
+    }
+
+    val loadMoreLatest: () -> Unit = {
+        if (!isLatestLoadingMore && latestHasMore && latestCurrentPage < 5) {
+            scope.launch(Dispatchers.IO) {
+                isLatestLoadingMore = true
+                val nextPage = latestCurrentPage + 1
+                plugin.getLatestUpdatesUiModels(nextPage).onSuccess { models ->
+                    if (models.isNotEmpty()) {
+                        scrapedLatestItems = scrapedLatestItems + models
+                        latestCurrentPage = nextPage
+                    } else {
+                        latestHasMore = false
+                    }
+                }.onFailure {
+                    latestHasMore = false
+                }
+                isLatestLoadingMore = false
+            }
         }
     }
 
@@ -163,6 +178,8 @@ fun HomeScreen(
             result.onSuccess { models ->
                 Log.d("ToshoScraper", "Refresh returned ${models.size} items")
                 scrapedLatestItems = models
+                latestCurrentPage = 1
+                latestHasMore = true
                 Toast.makeText(context, "Refreshed latest updates", Toast.LENGTH_SHORT).show()
             }.onFailure { error ->
                 Log.e("ToshoScraper", "Latest updates refresh failed", error)
@@ -196,32 +213,57 @@ fun HomeScreen(
         filtered
     }
 
+    var scrapedPopularItems by remember { mutableStateOf<List<PopularUIModel>>(emptyList()) }
+    var popularCurrentPage by remember { mutableStateOf(1) }
+    var isPopularLoadingMore by remember { mutableStateOf(false) }
+    var popularHasMore by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            plugin.getPopularUIModels(1).onSuccess { models ->
+                scrapedPopularItems = models
+            }
+        }
+    }
+
+    val loadMorePopular: () -> Unit = {
+        if (!isPopularLoadingMore && popularHasMore && popularCurrentPage < 5) {
+            scope.launch(Dispatchers.IO) {
+                isPopularLoadingMore = true
+                val nextPage = popularCurrentPage + 1
+                plugin.getPopularUIModels(nextPage).onSuccess { models ->
+                    if (models.isNotEmpty()) {
+                        scrapedPopularItems = scrapedPopularItems + models
+                        popularCurrentPage = nextPage
+                    } else {
+                        popularHasMore = false
+                    }
+                }.onFailure {
+                    popularHasMore = false
+                }
+                isPopularLoadingMore = false
+            }
+        }
+    }
+
+    val popularUiItems = remember(scrapedPopularItems, searchQuery) {
+        val filtered = if (searchQuery.isBlank()) {
+            scrapedPopularItems
+        } else {
+            scrapedPopularItems.filter { item ->
+                item.title.contains(searchQuery, ignoreCase = true)
+            }
+        }
+        filtered
+    }
+
     val textPrimary = if (isDarkTheme) DarkTextPrimary else LightTextPrimary
     val textSecondary = if (isDarkTheme) DarkTextSecondary else LightTextSecondary
     val glassBg = if (isDarkTheme) DarkGlassBackground else LightGlassBackground
     val glassBorder = if (isDarkTheme) DarkGlassBorder else LightGlassBorder
 
-    val allSampleData = remember { getMockMangaList() }
-
-    // Filter items in the active category based on user search query
     val filteredItems = remember(selectedCategory, searchQuery) {
-        val categoryList = when (selectedCategory) {
-            HomeCategory.FEATURED -> allSampleData
-            HomeCategory.CONTINUE_READING -> allSampleData.filter { it.progress > 0f }
-            HomeCategory.TRENDING_NOW -> allSampleData.sortedBy { it.rank }
-            HomeCategory.LATEST_UPDATES -> emptyList() // handled via latestUiItems
-            HomeCategory.POPULAR -> allSampleData.sortedByDescending { it.rating }
-        }
-
-        if (searchQuery.isBlank()) {
-            categoryList
-        } else {
-            categoryList.filter {
-                it.title.contains(searchQuery, ignoreCase = true) ||
-                        it.author.contains(searchQuery, ignoreCase = true) ||
-                        it.genres.any { g -> g.contains(searchQuery, ignoreCase = true) }
-            }
-        }
+        emptyList<SampleManga>()
     }
 
     Column(
@@ -397,7 +439,50 @@ fun HomeScreen(
                         )
                     },
                     isRefreshing = isRefreshing,
-                    onRefresh = refreshLatest
+                    onRefresh = refreshLatest,
+                    isLoadingMore = isLatestLoadingMore,
+                    onLoadMore = loadMoreLatest
+                )
+            }
+        } else if (selectedCategory == HomeCategory.POPULAR) {
+            if (popularUiItems.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (scrapedPopularItems.isEmpty()) {
+                            "LOADING POPULAR TITLES..."
+                        } else {
+                            "NO TITLES FOUND"
+                        },
+                        style = TextStyle(
+                            fontFamily = FontFamily.SansSerif,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp,
+                            color = textSecondary
+                        )
+                    )
+                }
+            } else {
+                PopularView(
+                    items = popularUiItems,
+                    isDarkTheme = isDarkTheme,
+                    onMangaClick = { uiModel ->
+                        onMangaClick(
+                            SampleManga(
+                                id = uiModel.id,
+                                title = uiModel.title,
+                                author = "Atsumaru",
+                                rating = uiModel.rating,
+                                genres = listOf(uiModel.type),
+                                synopsis = "",
+                                coverUrl = uiModel.coverUrl
+                            )
+                        )
+                    },
+                    isLoadingMore = isPopularLoadingMore,
+                    onLoadMore = loadMorePopular
                 )
             }
         } else if (filteredItems.isEmpty()) {
@@ -417,27 +502,8 @@ fun HomeScreen(
             }
         } else {
             when (selectedCategory) {
-                HomeCategory.FEATURED -> FeaturedView(
-                    items = filteredItems,
-                    isDarkTheme = isDarkTheme,
-                    onMangaClick = onMangaClick
-                )
-                HomeCategory.CONTINUE_READING -> ContinueReadingView(
-                    items = filteredItems,
-                    isDarkTheme = isDarkTheme,
-                    onMangaClick = onMangaClick
-                )
-                HomeCategory.TRENDING_NOW -> TrendingView(
-                    items = filteredItems,
-                    isDarkTheme = isDarkTheme,
-                    onMangaClick = onMangaClick
-                )
-                HomeCategory.LATEST_UPDATES -> Unit // Rendered by the dedicated branch above.
-                HomeCategory.POPULAR -> PopularView(
-                    items = filteredItems,
-                    isDarkTheme = isDarkTheme,
-                    onMangaClick = onMangaClick
-                )
+                HomeCategory.LATEST_UPDATES -> Unit
+                HomeCategory.POPULAR -> Unit
             }
         }
     }
@@ -850,13 +916,30 @@ private fun LatestUpdatesView(
     isDarkTheme: Boolean,
     onItemClick: (LatestUpdateUiModel) -> Unit,
     isRefreshing: Boolean,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    isLoadingMore: Boolean,
+    onLoadMore: () -> Unit
 ) {
     val context = LocalContext.current
     val textPrimary = if (isDarkTheme) DarkTextPrimary else LightTextPrimary
     val textSecondary = if (isDarkTheme) DarkTextSecondary else LightTextSecondary
     val glassBg = if (isDarkTheme) DarkGlassBackground else LightGlassBackground
     val glassBorder = if (isDarkTheme) DarkGlassBorder else LightGlassBorder
+
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+
+    LaunchedEffect(listState) {
+        androidx.compose.runtime.snapshotFlow {
+            val layoutInfo = listState.layoutInfo
+            val totalItems = layoutInfo.totalItemsCount
+            val lastVisibleItemIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            totalItems > 0 && lastVisibleItemIndex >= totalItems - 3
+        }.collect { shouldLoadMore ->
+            if (shouldLoadMore && !isLoadingMore) {
+                onLoadMore()
+            }
+        }
+    }
 
     Log.d(
         "ToshoScraper",
@@ -869,6 +952,7 @@ private fun LatestUpdatesView(
         modifier = Modifier.fillMaxSize()
     ) {
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(bottom = 32.dp)
@@ -996,6 +1080,22 @@ private fun LatestUpdatesView(
                     }
                 }
             }
+
+            if (isLoadingMore) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            modifier = Modifier.size(28.dp),
+                            color = textPrimary
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -1005,106 +1105,176 @@ private fun LatestUpdatesView(
 // =========================================================================
 @Composable
 private fun PopularView(
-    items: List<SampleManga>,
+    items: List<PopularUIModel>,
     isDarkTheme: Boolean,
-    onMangaClick: (SampleManga) -> Unit
+    onMangaClick: (PopularUIModel) -> Unit,
+    isLoadingMore: Boolean,
+    onLoadMore: () -> Unit
 ) {
+    val context = LocalContext.current
     val textPrimary = if (isDarkTheme) DarkTextPrimary else LightTextPrimary
     val textSecondary = if (isDarkTheme) DarkTextSecondary else LightTextSecondary
-    val glassBg = if (isDarkTheme) DarkGlassBackground else LightGlassBackground
-    val glassBorder = if (isDarkTheme) DarkGlassBorder else LightGlassBorder
 
-    LazyColumn(
+    val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+
+    LaunchedEffect(gridState) {
+        androidx.compose.runtime.snapshotFlow {
+            val layoutInfo = gridState.layoutInfo
+            val totalItems = layoutInfo.totalItemsCount
+            val lastVisibleItemIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            totalItems > 0 && lastVisibleItemIndex >= totalItems - 4
+        }.collect { shouldLoadMore ->
+            if (shouldLoadMore && !isLoadingMore) {
+                onLoadMore()
+            }
+        }
+    }
+
+    LazyVerticalGrid(
+        state = gridState,
+        columns = GridCells.Fixed(2),
         modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
         contentPadding = PaddingValues(bottom = 32.dp)
     ) {
         items(items) { manga ->
-            Surface(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable { onMangaClick(manga) },
-                shape = RoundedCornerShape(10.dp),
-                color = glassBg,
-                border = androidx.compose.foundation.BorderStroke(1.dp, glassBorder)
+                    .clickable { onMangaClick(manga) }
             ) {
-                Row(
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .aspectRatio(0.7f)
+                        .clip(RoundedCornerShape(10.dp))
                 ) {
-                    // Large Bold Rank Number
-                    Text(
-                        text = String.format("%02d", manga.rank),
-                        style = TextStyle(
-                            fontFamily = FontFamily.SansSerif,
-                            fontWeight = FontWeight.Black,
-                            fontSize = 28.sp,
-                            letterSpacing = (-1).sp,
-                            color = textSecondary.copy(alpha = 0.5f)
-                        ),
-                        modifier = Modifier.width(42.dp)
-                    )
-
-                    Image(
-                        painter = painterResource(id = R.drawable.cover_example),
-                        contentDescription = manga.title,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .size(width = 50.dp, height = 70.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                    )
-
-                    Spacer(modifier = Modifier.width(12.dp))
-
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = manga.title.uppercase(),
-                            style = TextStyle(
-                                fontFamily = FontFamily.SansSerif,
-                                fontWeight = FontWeight.Black,
-                                fontSize = 15.sp,
-                                letterSpacing = (-0.5).sp,
-                                color = textPrimary
-                            ),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                    if (!manga.coverUrl.isNullOrEmpty()) {
+                        val imageRequest = remember(manga.coverUrl) {
+                            ImageRequest.Builder(context)
+                                .data(manga.coverUrl)
+                                .crossfade(true)
+                                .build()
+                        }
+                        AsyncImage(
+                            model = imageRequest,
+                            contentDescription = manga.title,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
                         )
+                    } else {
+                        Image(
+                            painter = painterResource(id = R.drawable.cover_example),
+                            contentDescription = manga.title,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
 
-                        Spacer(modifier = Modifier.height(3.dp))
-
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.Star,
-                                contentDescription = null,
-                                tint = Color(0xFFFFD700),
-                                modifier = Modifier.size(13.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
+                    // Bottom Badges Row (compact unit aligned to bottom right)
+                    Row(
+                        modifier = Modifier
+                            .padding(6.dp)
+                            .align(Alignment.BottomEnd),
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // 1. Viewer Count Badge
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = Color.Black.copy(alpha = 0.8f)
+                        ) {
                             Text(
-                                text = "${manga.rating} • ${manga.genres.firstOrNull() ?: "Manga"}",
-                                fontSize = 12.sp,
+                                text = manga.viewerCount,
+                                fontSize = 9.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = textSecondary
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 2.dp, vertical = 1.dp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
 
-                        Spacer(modifier = Modifier.height(2.dp))
+                        // 2. Type Badge
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = Color.Black.copy(alpha = 0.8f)
+                        ) {
+                            Text(
+                                text = manga.type,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 2.dp, vertical = 1.dp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
 
-                        Text(
-                            text = "by ${manga.author}",
-                            fontSize = 11.sp,
-                            color = textSecondary
-                        )
+                        // 3. Rating Badge
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = Color.Black.copy(alpha = 0.8f)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp),
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Star,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFFD700),
+                                    modifier = Modifier.size(10.dp)
+                                )
+                                Spacer(modifier = Modifier.width(1.dp))
+                                Text(
+                                    text = manga.rating,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                    maxLines = 1
+                                )
+                            }
+                        }
                     }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = manga.title.uppercase(),
+                    style = TextStyle(
+                        fontFamily = FontFamily.SansSerif,
+                        fontWeight = FontWeight.Black,
+                        fontSize = 15.sp,
+                        letterSpacing = (-0.5).sp,
+                        color = textPrimary
+                    ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+
+        if (isLoadingMore) {
+            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(2) }) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        modifier = Modifier.size(28.dp),
+                        color = textPrimary
+                    )
                 }
             }
         }
     }
 }
-
 @Composable
 private fun MangaListRowCard(
     manga: SampleManga,
