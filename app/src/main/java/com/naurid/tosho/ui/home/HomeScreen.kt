@@ -1,5 +1,6 @@
 package com.naurid.tosho.ui.home
 
+import android.util.Log
 import android.widget.Toast
 import com.naurid.tosho.source.core.atsumaru.LatestUpdateUiModel
 import androidx.compose.animation.AnimatedVisibility
@@ -124,68 +125,75 @@ fun HomeScreen(
     var searchQuery by remember { mutableStateOf("") }
     var scrapedLatestItems by remember { mutableStateOf<List<LatestUpdateUiModel>>(emptyList()) }
     var isRefreshing by remember { mutableStateOf(false) }
-    var currentPage by remember { mutableStateOf(1) }
-    var isLoadingMore by remember { mutableStateOf(false) }
-    var hasMore by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
     val plugin = remember { com.naurid.tosho.source.core.atsumaru.AtsumaruSourcePlugin() }
 
-    // Fetch tailored UI models on app open via AtsumaruSourcePlugin
+    // Fetch latest updates when HomeScreen first enters composition.
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
-            plugin.getLatestUpdatesUiModels(1).onSuccess { models ->
-                scrapedLatestItems = models
+        Log.d("ToshoScraper", "Starting latest updates fetch...")
+
+        val result = withContext(Dispatchers.IO) {
+            plugin.getLatestUpdatesUiModels(1)
+        }
+
+        result.onSuccess { models ->
+            Log.d("ToshoScraper", "Fetched ${models.size} items")
+            models.take(5).forEach { model ->
+                Log.d("ToshoScraper", "Fetched title: ${model.title}")
             }
+
+            // LaunchedEffect resumes on Main, so Compose state is updated safely.
+            scrapedLatestItems = models
+            Log.d("ToshoScraper", "scrapedLatestItems assigned: ${scrapedLatestItems.size}")
+        }.onFailure { error ->
+            Log.e("ToshoScraper", "Latest updates fetch failed", error)
         }
     }
 
-    val loadMore: () -> Unit = {
-        if (!isLoadingMore && hasMore && currentPage < 4) {
-            scope.launch(Dispatchers.IO) {
-                isLoadingMore = true
-                val nextPage = currentPage + 1
-                plugin.getLatestUpdatesUiModels(nextPage).onSuccess { models ->
-                    if (models.isNotEmpty()) {
-                        scrapedLatestItems = scrapedLatestItems + models
-                        currentPage = nextPage
-                    } else {
-                        hasMore = false
-                    }
-                }.onFailure {
-                    hasMore = false
-                }
-                isLoadingMore = false
-            }
-        }
-    }
-
+    // Pull-to-refresh. The coroutine starts on Main; only the network call runs on IO.
     val refreshLatest: () -> Unit = {
-        scope.launch(Dispatchers.IO) {
+        scope.launch {
             isRefreshing = true
-            plugin.refreshLatestUpdatesUiModels().onSuccess { models ->
-                scrapedLatestItems = models
-                currentPage = 1
-                hasMore = true
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Refreshed latest updates", Toast.LENGTH_SHORT).show()
-                }
-            }.onFailure { e ->
-                withContext(Dispatchers.Main) {
-                    val message = if (e.message == "COOLDOWN") {
-                        "Please wait a few minutes before refreshing again to respect server limits."
-                    } else {
-                        "Refresh failed. Please check your connection."
-                    }
-                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-                }
+            Log.d("ToshoScraper", "Refreshing latest updates...")
+
+            val result = withContext(Dispatchers.IO) {
+                plugin.refreshLatestUpdatesUiModels()
             }
+
+            result.onSuccess { models ->
+                Log.d("ToshoScraper", "Refresh returned ${models.size} items")
+                scrapedLatestItems = models
+                Toast.makeText(context, "Refreshed latest updates", Toast.LENGTH_SHORT).show()
+            }.onFailure { error ->
+                Log.e("ToshoScraper", "Latest updates refresh failed", error)
+                val message = if (error.message == "COOLDOWN") {
+                    "Please wait a few minutes before refreshing again to respect server limits."
+                } else {
+                    "Refresh failed. Please check your connection."
+                }
+                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            }
+
             isRefreshing = false
         }
     }
 
+    // Search the scraped list. This is always non-null, even before the first fetch finishes.
     val latestUiItems = remember(scrapedLatestItems, searchQuery) {
-        val list = scrapedLatestItems ?: emptyList()
-        if (searchQuery.isBlank()) list else list.filter { it.title.contains(searchQuery, ignoreCase = true) }
+        Log.d("ToshoScraper", "Building latestUiItems...")
+        Log.d("ToshoScraper", "scrapedLatestItems size: ${scrapedLatestItems.size}")
+        Log.d("ToshoScraper", "Search query: '$searchQuery'")
+
+        val filtered = if (searchQuery.isBlank()) {
+            scrapedLatestItems
+        } else {
+            scrapedLatestItems.filter { item ->
+                item.title.contains(searchQuery, ignoreCase = true)
+            }
+        }
+
+        Log.d("ToshoScraper", "latestUiItems size: ${filtered.size}")
+        filtered
     }
 
     val textPrimary = if (isDarkTheme) DarkTextPrimary else LightTextPrimary
@@ -343,8 +351,56 @@ fun HomeScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // 3. MAIN CONTENT AREA FOR ACTIVE CATEGORY
-        if (filteredItems.isEmpty()) {
+        Log.d(
+            "ToshoScraper",
+            "Selected category: $selectedCategory | " +
+                    "filteredItems: ${filteredItems.size} | " +
+                    "latestUiItems: ${latestUiItems.size}"
+        )
+
+        // Latest Updates has its own scraped list, not the mock-data filteredItems list.
+        if (selectedCategory == HomeCategory.LATEST_UPDATES) {
+            if (latestUiItems.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (scrapedLatestItems.isEmpty()) {
+                            "LOADING LATEST UPDATES..."
+                        } else {
+                            "NO TITLES FOUND"
+                        },
+                        style = TextStyle(
+                            fontFamily = FontFamily.SansSerif,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp,
+                            color = textSecondary
+                        )
+                    )
+                }
+            } else {
+                LatestUpdatesView(
+                    items = latestUiItems,
+                    isDarkTheme = isDarkTheme,
+                    onItemClick = { uiModel ->
+                        onMangaClick(
+                            SampleManga(
+                                id = uiModel.id,
+                                title = uiModel.title,
+                                author = "Atsumaru",
+                                rating = uiModel.rating,
+                                genres = listOf(uiModel.type),
+                                synopsis = "",
+                                coverUrl = uiModel.coverUrl
+                            )
+                        )
+                    },
+                    isRefreshing = isRefreshing,
+                    onRefresh = refreshLatest
+                )
+            }
+        } else if (filteredItems.isEmpty()) {
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
@@ -361,57 +417,27 @@ fun HomeScreen(
             }
         } else {
             when (selectedCategory) {
-                HomeCategory.FEATURED -> {
-                    FeaturedView(
-                        items = filteredItems,
-                        isDarkTheme = isDarkTheme,
-                        onMangaClick = onMangaClick
-                    )
-                }
-                HomeCategory.CONTINUE_READING -> {
-                    ContinueReadingView(
-                        items = filteredItems,
-                        isDarkTheme = isDarkTheme,
-                        onMangaClick = onMangaClick
-                    )
-                }
-                HomeCategory.TRENDING_NOW -> {
-                    TrendingView(
-                        items = filteredItems,
-                        isDarkTheme = isDarkTheme,
-                        onMangaClick = onMangaClick
-                    )
-                }
-                HomeCategory.LATEST_UPDATES -> {
-                    LatestUpdatesView(
-                        items = latestUiItems,
-                        isDarkTheme = isDarkTheme,
-                        onItemClick = { uiModel ->
-                            onMangaClick(
-                                SampleManga(
-                                    id = uiModel.id,
-                                    title = uiModel.title,
-                                    author = "Atsumaru",
-                                    rating = uiModel.rating,
-                                    genres = listOf(uiModel.type),
-                                    synopsis = "",
-                                    coverUrl = uiModel.coverUrl
-                                )
-                            )
-                        },
-                        isRefreshing = isRefreshing,
-                        onRefresh = refreshLatest,
-                        isLoadingMore = isLoadingMore,
-                        onLoadMore = loadMore
-                    )
-                }
-                HomeCategory.POPULAR -> {
-                    PopularView(
-                        items = filteredItems,
-                        isDarkTheme = isDarkTheme,
-                        onMangaClick = onMangaClick
-                    )
-                }
+                HomeCategory.FEATURED -> FeaturedView(
+                    items = filteredItems,
+                    isDarkTheme = isDarkTheme,
+                    onMangaClick = onMangaClick
+                )
+                HomeCategory.CONTINUE_READING -> ContinueReadingView(
+                    items = filteredItems,
+                    isDarkTheme = isDarkTheme,
+                    onMangaClick = onMangaClick
+                )
+                HomeCategory.TRENDING_NOW -> TrendingView(
+                    items = filteredItems,
+                    isDarkTheme = isDarkTheme,
+                    onMangaClick = onMangaClick
+                )
+                HomeCategory.LATEST_UPDATES -> Unit // Rendered by the dedicated branch above.
+                HomeCategory.POPULAR -> PopularView(
+                    items = filteredItems,
+                    isDarkTheme = isDarkTheme,
+                    onMangaClick = onMangaClick
+                )
             }
         }
     }
@@ -832,6 +858,11 @@ private fun LatestUpdatesView(
     val glassBg = if (isDarkTheme) DarkGlassBackground else LightGlassBackground
     val glassBorder = if (isDarkTheme) DarkGlassBorder else LightGlassBorder
 
+    Log.d(
+        "ToshoScraper",
+        "LatestUpdatesView called with ${items.size} items"
+    )
+
     PullToRefreshBox(
         isRefreshing = isRefreshing,
         onRefresh = onRefresh,
@@ -843,6 +874,7 @@ private fun LatestUpdatesView(
             contentPadding = PaddingValues(bottom = 32.dp)
         ) {
             items(items) { item ->
+                Log.d("ToshoScraper", "Rendering manga: ${item.title}")
                 Surface(
                     modifier = Modifier
                         .fillMaxWidth()

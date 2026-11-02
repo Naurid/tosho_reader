@@ -155,8 +155,15 @@ class AtsumaruSourcePlugin : SourcePlugin {
             val obj = itemsArray.getJSONObject(i)
             val id = obj.optString("id", "")
             val title = obj.optString("title", "Unknown")
-            val imagePath = obj.optString("image", "")
-            val coverUrl = if (imagePath.startsWith("http")) imagePath else "https://cdn.atsu.moe/$imagePath"
+            val imagePath = obj.optString("image", "").trim()
+
+            val coverUrl = when {
+                imagePath.isBlank() -> null
+                imagePath.startsWith("http://") || imagePath.startsWith("https://") -> imagePath
+                else -> "https://cdn.atsu.moe/static/${imagePath.trimStart('/')}"
+            }
+
+            Log.d("ToshoScraper", "Cover URL for '$title': $coverUrl")
             val views = obj.optString("views", "0") + " views"
             val rawRating = obj.optDouble("mbRating", 7.0)
             val rating = String.format(Locale.US, "%.1f", rawRating)
@@ -185,10 +192,10 @@ class AtsumaruSourcePlugin : SourcePlugin {
                     id = book.id,
                     title = book.title,
                     coverUrl = book.coverUrl,
-                    viewerCount = "18.4K views",
-                    rating = "4.9",
-                    type = "Manga",
-                    timeAgo = "1 hour ago",
+                    viewerCount = book.viewerCount,
+                    rating = book.rating,
+                    type = book.type,
+                    timeAgo = book.timeAgo,
                     url = book.url
                 )
             }
